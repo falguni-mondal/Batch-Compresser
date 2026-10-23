@@ -1,0 +1,22 @@
+{
+  "do_normalize": true,
+  "do_rescale": false,
+  "do_resize": true,
+  "feature_extractor_type": "ViTFeatureExtractor",
+  "image_mean": [
+    128,
+    128,
+    128
+  ],
+  "image_processor_type": "ViTFeatureExtractor",
+  "image_std": [
+    256,
+    256,
+    256
+  ],
+  "resample": 2,
+  "size": {
+    "height": 1024,
+    "width": 1024
+  }
+}

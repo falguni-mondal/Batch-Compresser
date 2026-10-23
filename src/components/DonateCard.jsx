@@ -11,7 +11,7 @@
 //   NEXT_PUBLIC_UPI_ID, NEXT_PUBLIC_UPI_NAME, NEXT_PUBLIC_BMAC_URL
 // A missing option is hidden. If both are missing the card renders nothing.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import DonateCat from "@/components/DonateCat";
 import DonateQR from "@/components/DonateQR";
 import { isMobileDevice, prefersReducedMotion } from "@/lib/device";
@@ -36,7 +36,7 @@ const btnBase =
 const chipBase =
   "flex h-10 cursor-pointer items-center justify-center rounded-none border-[3px] border-neutral-900 px-2 text-xs font-black uppercase tracking-wider text-neutral-900 transition-[transform,box-shadow,background-color] duration-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-neutral-900/30";
 
-export default function DonateCard({ className = "" }) {
+function DonateCard({ className = "" }) {
   const config = useMemo(() => getDonateConfig(), []);
   const { upiReady, bmacReady, bmacUrl, enabled } = config;
 
@@ -281,3 +281,5 @@ export default function DonateCard({ className = "" }) {
     </div>
   );
 }
+
+export default memo(DonateCard);

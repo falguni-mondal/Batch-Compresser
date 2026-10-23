@@ -1,5 +1,8 @@
 "use client";
 
+import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
+
 // THE LOADER: a tiny 8x8 "photo" (dusk sky, low sun, ridge line) made of separate pixels.
 // On a loop the pixels fuse into 2x2 blocks, then 4x4 blocks, then split back apart.
 // That is literally what lossy compression does, so the animation explains the app.
@@ -12,12 +15,16 @@ const mix = (c1, c2, t) => c1.map((v, i) => lerp(v, c2[i], t));
 
 // Deterministic scene, so the server and client always agree.
 function scenePixel(fx, fy) {
-  const ridge = 0.64 + 0.09 * Math.sin(fx * 7.2) + 0.05 * Math.sin(fx * 15 + 1.3);
-  if (fy > ridge) return mix([34, 44, 84], [14, 20, 44], clamp((fy - ridge) * 3, 0, 1));
+  const ridge =
+    0.64 + 0.09 * Math.sin(fx * 7.2) + 0.05 * Math.sin(fx * 15 + 1.3);
+  if (fy > ridge)
+    return mix([34, 44, 84], [14, 20, 44], clamp((fy - ridge) * 3, 0, 1));
   const sun = Math.hypot(fx - 0.68, (fy - 0.5) * 1.1);
   if (sun < 0.15) return [255, 228, 160];
   const sky = mix([58, 74, 168], [255, 156, 118], clamp(fy / ridge, 0, 1));
-  return sun < 0.28 ? mix(sky, [255, 205, 140], ((0.28 - sun) / 0.13) * 0.6) : sky;
+  return sun < 0.28
+    ? mix(sky, [255, 205, 140], ((0.28 - sun) / 0.13) * 0.6)
+    : sky;
 }
 
 const css = (c) => `rgb(${c.map((v) => Math.round(v)).join(",")})`;
@@ -28,7 +35,8 @@ function buildTiles(grid) {
 
   const base = [];
   for (let y = 0; y < grid; y++) {
-    for (let x = 0; x < grid; x++) base.push(scenePixel((x + 0.5) / grid, (y + 0.5) / grid));
+    for (let x = 0; x < grid; x++)
+      base.push(scenePixel((x + 0.5) / grid, (y + 0.5) / grid));
   }
 
   const blockAverage = (x, y, size) => {
@@ -88,7 +96,12 @@ export function PixelStyles() {
   return <style>{STYLES}</style>;
 }
 
-export function PixelMosaic({ size = 96, grid = 8, animated = true, className = "" }) {
+export function PixelMosaic({
+  size = 96,
+  grid = 8,
+  animated = true,
+  className = "",
+}) {
   const tiles = buildTiles(grid);
   return (
     <div
@@ -118,17 +131,36 @@ export function PixelMosaic({ size = 96, grid = 8, animated = true, className = 
   );
 }
 
-export function LoadingOverlay({ title, detail, progress, onCancel, cancelling = false }) {
-  return (
+export function LoadingOverlay({
+  title,
+  detail,
+  progress,
+  onCancel,
+  cancelling = false,
+}) {
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, []);
+
+  const overlayNode = (
     <div
       role="status"
       aria-live="polite"
-      className="px-fade fixed inset-0 z-50 flex items-center justify-center bg-white/80 px-6 backdrop-blur-md"
+      className="px-fade fixed inset-0 z-[9999] flex h-[100dvh] w-[100vw] items-center justify-center bg-white/85 px-6 backdrop-blur-md"
     >
       <div className="flex flex-col items-center text-center">
         <PixelMosaic size={120} />
         <p className="mt-8 text-base font-semibold text-gray-900">{title}</p>
-        {detail && <p className="mt-1 max-w-xs text-sm text-gray-500">{detail}</p>}
+        {detail && (
+          <p className="mt-1 max-w-xs text-sm text-gray-500">{detail}</p>
+        )}
 
         {typeof progress === "number" && (
           <div className="mt-6 h-1 w-56 overflow-hidden rounded-full bg-gray-200">
@@ -151,4 +183,9 @@ export function LoadingOverlay({ title, detail, progress, onCancel, cancelling =
       </div>
     </div>
   );
+
+  if (mounted && typeof document !== "undefined") {
+    return createPortal(overlayNode, document.body);
+  }
+  return overlayNode;
 }

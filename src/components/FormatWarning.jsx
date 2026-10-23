@@ -6,7 +6,7 @@
 //    is blocked: the user either continues or switches to WebP.
 // Wording lives here, so lib/device.js only has to return codes.
 
-import { useEffect, useId, useRef } from "react";
+import { memo, useEffect, useId, useRef } from "react";
 import { getLenis } from "@/components/SmoothScroll";
 
 const AVIF_COPY = {
@@ -36,15 +36,15 @@ const COPY = {
   },
 };
 
-// Starting guess (T): one 12 MP HEIC to AVIF at 1080 px on a phone. NOT measured yet.
+// Starting guess (T): one 12 MP HEIC to AVIF at 1080 px on a phone (with speed 8).
 // It only feeds the "about N min" line in the confirm dialog. Once the first image is done,
 // the loading screen shows a live estimate from real timings.
-const BASE_SECONDS_PER_IMAGE = 40;
+const BASE_SECONDS_PER_IMAGE = 18;
 
-/** "about 14 min" for the confirm dialog. Rough on purpose. */
+/** "about 6 min" for the confirm dialog. Rough on purpose. */
 export function estimateText({ count, width, hasMaxKB }) {
   const w = Math.min(Math.max(Number(width) || 1080, 400), 3840);
-  const perImage = BASE_SECONDS_PER_IMAGE * (w / 1080) ** 2 * (hasMaxKB ? 3 : 1);
+  const perImage = BASE_SECONDS_PER_IMAGE * (w / 1080) ** 2 * (hasMaxKB ? 2.5 : 1);
   const minutes = Math.max(1, Math.round((count * perImage) / 60));
   return `about ${minutes} min`;
 }
@@ -86,7 +86,7 @@ const switchBtn =
  *           onSwitch?: () => void, className?: string }} props
  *   onSwitch changes the output format to WebP. className sets the outer spacing/width.
  */
-export default function FormatWarning({ advice, onSwitch, className = "mb-6" }) {
+function FormatWarning({ advice, onSwitch, className = "mb-6" }) {
   const copy = advice ? COPY[advice.reason] : null;
   if (!copy || advice.level === "none") return null;
   const strong = advice.level === "strong";
@@ -124,6 +124,8 @@ export default function FormatWarning({ advice, onSwitch, className = "mb-6" }) 
     </div>
   );
 }
+
+export default memo(FormatWarning);
 
 const DIALOG_CSS = `
 @keyframes fw-fade{from{opacity:0}to{opacity:1}}

@@ -1,22 +1,126 @@
-// Disk-backed stash for picked files (phones only). The picker's File is only a lazy
-// handle that can expire; one read right after the pick moves the bytes into IndexedDB
-// (stored on disk, not in the JS heap) and we keep a File backed by that copy.
-import { isMobileDevice } from "./device";
+// Bulletproof file acquisition & stash for both Mobile and PC/Laptop.
+//
+// Why NotReadableError happened on mobile when upscaling or removing backgrounds:
+//  1) On Android Chrome, selecting a file from the Photo Picker (`content://media/picker/...`)
+//     grants a short-lived stream handle. If `ImageDropzone` reads that raw `File` for a thumbnail
+//     or if the user waits a few seconds before tapping "Upscale", Android closes/revokes the
+//     underlying `content://` descriptor and throws:
+//     `NotReadableError: The requested file could not be read, typically due to permission problems...`
+//  2) How we fix it across ALL tools (Optimizer, Upscaler, BG Remover, Passport, Video):
+//     The instant the user selects a file, `stash(id, file)` reads the raw bytes via
+//     `readBytesWithRetry(file)` BEFORE thumbnail generation (`ready: false -> true`) and wraps
+//     those bytes into a detached in-memory `File` (`new File([buffer], ...)`). Because the bytes
+//     already live in JS memory, Android can never revoke access or throw `NotReadableError`.
+
+import { isLowMemoryDevice, isMobileDevice } from "./device";
 
 const DB = "pixshrink-stash";
 const STORE = "files";
-const RAM_FILE_MAX = 8 * 1024 * 1024; // fallback only: small files
-const RAM_TOTAL_MAX = 96 * 1024 * 1024; // fallback only: total cap
-const SOURCE_ERRORS = new Set(["NotFoundError", "NotReadableError", "SecurityError"]);
+const MB = 1024 * 1024;
 
-const ram = new Map(); // id -> bytes held by the fallback
+const ram = new Map(); // id -> byteLength held in RAM
+const fileCache = new Map(); // id -> detached in-memory File reference
 let ramBytes = 0;
 let dbp;
 
+function getRamCapBytes() {
+  if (isMobileDevice()) {
+    return (isLowMemoryDevice() ? 180 : 320) * MB;
+  }
+  return (isLowMemoryDevice() ? 350 : 750) * MB;
+}
+
+function getSingleFileRamMaxBytes() {
+  return (isMobileDevice() ? 120 : 250) * MB;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function readViaFileReader(blob) {
+  return new Promise((resolve, reject) => {
+    if (typeof FileReader === "undefined") {
+      reject(new Error("FileReader unavailable"));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () =>
+      reject(reader.error || new Error("FileReader failed"));
+    reader.readAsArrayBuffer(blob);
+  });
+}
+
+function readViaObjectUrlFetch(blob) {
+  return new Promise((resolve, reject) => {
+    if (typeof URL === "undefined" || typeof fetch === "undefined") {
+      reject(new Error("ObjectURL fetch unavailable"));
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    fetch(url)
+      .then((r) => r.arrayBuffer())
+      .then((buf) => {
+        URL.revokeObjectURL(url);
+        resolve(buf);
+      })
+      .catch((err) => {
+        URL.revokeObjectURL(url);
+        reject(err);
+      });
+  });
+}
+
+/**
+ * Materializes the full byte array of `file` with automatic retries across `arrayBuffer()`,
+ * `FileReader`, and `URL.createObjectURL` fetch in case Android's MediaProvider is staging the file.
+ *
+ * @param {Blob} file
+ * @returns {Promise<ArrayBuffer>}
+ */
+export async function readBytesWithRetry(file) {
+  if (file && file._pixshrinkDetached && typeof file.arrayBuffer === "function") {
+    return file.arrayBuffer();
+  }
+
+  let lastError;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      if (typeof file.arrayBuffer === "function") {
+        const buf = await file.arrayBuffer();
+        if (buf && buf.byteLength > 0) return buf;
+      }
+    } catch (e) {
+      lastError = e;
+    }
+    try {
+      const buf = await readViaFileReader(file);
+      if (buf && buf.byteLength > 0) return buf;
+    } catch (e) {
+      lastError = e;
+    }
+    try {
+      const buf = await readViaObjectUrlFetch(file);
+      if (buf && buf.byteLength > 0) return buf;
+    } catch (e) {
+      lastError = e;
+    }
+    if (attempt < 3) await sleep(100 * (attempt + 1));
+  }
+  throw lastError || new Error(`Could not read "${file?.name || "file"}"`);
+}
+
 const db = () =>
   (dbp ??= new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("IndexedDB unavailable"));
+      return;
+    }
     const r = indexedDB.open(DB, 1);
-    r.onupgradeneeded = () => r.result.createObjectStore(STORE);
+    r.onupgradeneeded = () => {
+      if (!r.result.objectStoreNames.contains(STORE)) {
+        r.result.createObjectStore(STORE);
+      }
+    };
     r.onsuccess = () => resolve(r.result);
     r.onerror = () => reject(r.error);
   }).catch((e) => {
@@ -34,45 +138,79 @@ async function tx(mode, fn) {
   });
 }
 
-const rewrap = (blob, file) =>
-  new File([blob], file.name, { type: file.type, lastModified: file.lastModified });
-
-/** Reads `file` once and returns a File that can no longer expire. Throws if the source is unreadable. */
-export async function stash(id, file) {
+const rewrap = (part, file) => {
+  const f = new File([part], file.name, {
+    type: file.type || "application/octet-stream",
+    lastModified: file.lastModified || Date.now(),
+  });
   try {
-    await tx("readwrite", (s) => s.put(file, id));
-    const blob = await tx("readonly", (s) => s.get(id));
-    if (!blob) throw new Error("stash returned nothing");
-    return rewrap(blob, file);
-  } catch (e) {
-    if (SOURCE_ERRORS.has(e?.name)) throw e; // the file itself is gone
-    // Storage unavailable or full: small files get an in-memory copy, big ones stay as-is.
-    if (file.size <= RAM_FILE_MAX && ramBytes + file.size <= RAM_TOTAL_MAX) {
-      const copy = rewrap(await file.arrayBuffer(), file); // throws if the source is gone
-      ram.set(id, copy.size);
-      ramBytes += copy.size;
-      return copy;
-    }
-    // Big file, nowhere to copy it. Read one byte so a lapsed handle still gets flagged
-    // as broken now (it throws), instead of failing later at compress time. No RAM cost.
-    await file.slice(0, 1).arrayBuffer();
+    Object.defineProperty(f, "_pixshrinkDetached", {
+      value: true,
+      enumerable: false,
+    });
+  } catch {}
+  return f;
+};
+
+/**
+ * Reads `file` immediately into a detached in-memory File so it can NEVER expire
+ * with `NotReadableError` on Android/iOS later.
+ */
+export async function stash(id, file) {
+  if (file && file._pixshrinkDetached) {
+    fileCache.set(id, file);
     return file;
   }
+
+  const buffer = await readBytesWithRetry(file);
+  const size = buffer.byteLength;
+
+  if (size <= getSingleFileRamMaxBytes() && ramBytes + size <= getRamCapBytes()) {
+    const memFile = rewrap(buffer, file);
+    ram.set(id, size);
+    fileCache.set(id, memFile);
+    ramBytes += size;
+    return memFile;
+  }
+
+  try {
+    const detachedBlob = new Blob([buffer], {
+      type: file.type || "application/octet-stream",
+    });
+    await tx("readwrite", (s) => s.put(detachedBlob, id));
+    const diskBlob = await tx("readonly", (s) => s.get(id));
+    if (diskBlob && diskBlob.size > 0) {
+      const wrapped = rewrap(diskBlob, file);
+      fileCache.set(id, wrapped);
+      return wrapped;
+    }
+  } catch {}
+
+  const fallbackFile = rewrap(buffer, file);
+  ram.set(id, size);
+  fileCache.set(id, fallbackFile);
+  ramBytes += size;
+  return fallbackFile;
 }
 
-// Desktop never stashes anything, so these must not even open IndexedDB there.
+export function getStashedFile(id, fallbackFile) {
+  return fileCache.get(id) || fallbackFile;
+}
+
 export function unstash(id) {
-  if (!isMobileDevice()) return Promise.resolve();
+  fileCache.delete(id);
   if (ram.has(id)) {
-    ramBytes -= ram.get(id);
+    ramBytes = Math.max(0, ramBytes - ram.get(id));
     ram.delete(id);
   }
+  if (typeof indexedDB === "undefined") return Promise.resolve();
   return tx("readwrite", (s) => s.delete(id)).catch(() => {});
 }
 
 export function clearStash() {
-  if (!isMobileDevice()) return Promise.resolve();
+  fileCache.clear();
   ram.clear();
   ramBytes = 0;
+  if (typeof indexedDB === "undefined") return Promise.resolve();
   return tx("readwrite", (s) => s.clear()).catch(() => {});
 }
